@@ -14,14 +14,7 @@ import {
 } from 'react-native';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import StaticServer from 'react-native-static-server';
-import { startApiServer } from '../server/apiServer';
-import {
-  ensureWebRootFilesAsync,
-  getWebRootDir,
-  getWebRootNativePath,
-  writeSharedTextAsync,
-} from '../web/webRoot';
+import { startHttpServerAsync } from '../server/httpServer';
 import type { Theme } from '../theme/theme';
 
 const DEFAULT_PORT = 8080;
@@ -30,19 +23,14 @@ type Props = {
   theme: Theme;
 };
 
-const API_PORT_OFFSET = 1;
-
 export default function HomeScreen({ theme }: Props) {
   const [text, setText] = React.useState('');
   const [serverRunning, setServerRunning] = React.useState(false);
   const serverPort = DEFAULT_PORT;
   const [ipAddress, setIpAddress] = React.useState<string | null>(null);
-  const [serverUrl, setServerUrl] = React.useState<string | null>(null);
   const [starting, setStarting] = React.useState(false);
 
-  const serverRef = React.useRef<StaticServer | null>(null);
-  const apiRef = React.useRef<ReturnType<typeof startApiServer> | null>(null);
-  const debouncedWriteRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const serverRef = React.useRef<Awaited<ReturnType<typeof startHttpServerAsync>> | null>(null);
   const startingRef = React.useRef(false);
   const serverRunningRef = React.useRef(false);
   const snapshotRef = React.useRef<{ text: string; updatedAt: string }>({
@@ -70,8 +58,8 @@ export default function HomeScreen({ theme }: Props) {
       const host = ipAddress.includes(':') ? `[${ipAddress}]` : ipAddress;
       return `http://${host}:${serverPort}`;
     }
-    return serverUrl;
-  }, [ipAddress, serverPort, serverUrl]);
+    return null;
+  }, [ipAddress, serverPort, serverRunning, starting]);
 
   const startServerAsync = React.useCallback(async () => {
     if (startingRef.current || serverRunningRef.current) return;
@@ -79,7 +67,10 @@ export default function HomeScreen({ theme }: Props) {
     setStarting(true);
 
     try {
-      await ensureWebRootFilesAsync();
+      serverRef.current = await startHttpServerAsync({
+        port: serverPort,
+        getSnapshot: () => snapshotRef.current,
+      });
 
       let ip: string | null = null;
       try {
@@ -89,20 +80,6 @@ export default function HomeScreen({ theme }: Props) {
       }
       setIpAddress(ip);
 
-      const rootDirPath = getWebRootNativePath();
-      const server = new StaticServer(serverPort, rootDirPath, { localOnly: false });
-      serverRef.current = server;
-      const urlFromServer = await server.start();
-
-      apiRef.current = startApiServer({
-        port: serverPort + API_PORT_OFFSET,
-        getSnapshot: () => snapshotRef.current,
-        onRemoteText: (nextText) => {
-          setText((prev) => (prev === nextText ? prev : nextText));
-        },
-      });
-
-      setServerUrl(urlFromServer);
       serverRunningRef.current = true;
       setServerRunning(true);
     } catch (err) {
@@ -110,9 +87,7 @@ export default function HomeScreen({ theme }: Props) {
       Alert.alert('Could not start sharing', message);
       setIpAddress(null);
       setServerRunning(false);
-      setServerUrl(null);
       serverRef.current = null;
-      apiRef.current = null;
     } finally {
       startingRef.current = false;
       setStarting(false);
@@ -120,24 +95,15 @@ export default function HomeScreen({ theme }: Props) {
   }, [serverPort]);
 
   const stopServerAsync = React.useCallback(async () => {
-    try {
-      await apiRef.current?.stopAsync();
-    } catch {
-      // best-effort stop
-    } finally {
-      apiRef.current = null;
-    }
-
     if (!serverRef.current) {
       serverRunningRef.current = false;
       setIpAddress(null);
       setServerRunning(false);
-      setServerUrl(null);
       return;
     }
 
     try {
-      await serverRef.current.stop();
+      await serverRef.current.stopAsync();
     } catch {
       // best-effort stop
     } finally {
@@ -145,7 +111,6 @@ export default function HomeScreen({ theme }: Props) {
       serverRunningRef.current = false;
       setIpAddress(null);
       setServerRunning(false);
-      setServerUrl(null);
     }
   }, []);
 
@@ -155,19 +120,6 @@ export default function HomeScreen({ theme }: Props) {
       void stopServerAsync();
     };
   }, [startServerAsync, stopServerAsync]);
-
-  React.useEffect(() => {
-    if (!serverRunning) return;
-    if (debouncedWriteRef.current) clearTimeout(debouncedWriteRef.current);
-
-    debouncedWriteRef.current = setTimeout(() => {
-      void writeSharedTextAsync(text, snapshotRef.current.updatedAt);
-    }, 250);
-
-    return () => {
-      if (debouncedWriteRef.current) clearTimeout(debouncedWriteRef.current);
-    };
-  }, [serverRunning, text]);
 
   const copyUrlAsync = React.useCallback(async () => {
     if (!computedUrl) return;
@@ -258,6 +210,8 @@ export default function HomeScreen({ theme }: Props) {
             </Text>
           </View>
 
+          <Text style={styles.apiHint}>Open the URL on any device to view and copy the live text.</Text>
+
           <View style={styles.buttonRow}>
             <Pressable
               style={({ pressed }) => [styles.buttonPrimary, pressed && styles.buttonPressed]}
@@ -291,9 +245,7 @@ export default function HomeScreen({ theme }: Props) {
             <Text style={styles.miniMuted}>{text.length.toLocaleString()} chars</Text>
           </View>
 
-          <Text style={styles.bodyText}>
-            Tip: edits on the receiver web page will sync back here automatically.
-          </Text>
+          <Text style={styles.bodyText}>Tip: the receiver page updates automatically while you type.</Text>
 
           <TextInput
             value={text}
@@ -339,7 +291,7 @@ export default function HomeScreen({ theme }: Props) {
 
         <View style={styles.footer}>
           <Text style={styles.footerText}>For More Visit: https://muhammedgasal.com</Text>
-          <Text style={styles.footerText}>Web root: {getWebRootDir()}</Text>
+          <Text style={styles.footerText}>Two-way sync over LAN</Text>
         </View>
       </KeyboardAwareScrollView>
     </SafeAreaView>
@@ -489,6 +441,11 @@ function makeStyles(theme: Theme) {
     },
     urlHint: {
       fontSize: 12,
+      color: theme.colors.muted,
+    },
+    apiHint: {
+      fontSize: 12,
+      lineHeight: 16,
       color: theme.colors.muted,
     },
     buttonRow: {

@@ -51,20 +51,6 @@ button{
 }
 button.primary{background:rgba(248,250,252,0.14);border-color:rgba(248,250,252,0.28);color:var(--text)}
 button:active{transform: translateY(1px)}
-.editor{
-  width: 100%;
-  resize: vertical;
-  outline: none;
-  color: var(--text);
-  font: inherit;
-  font-size: 14px;
-  line-height: 1.45;
-  padding: 12px;
-  border-radius: 12px;
-  background: rgba(0,0,0,0.22);
-  border: 1px solid rgba(248,250,252,0.10);
-  min-height: 190px;
-}
 .preview{
   white-space: pre-wrap;
   word-break: break-word;
@@ -82,130 +68,195 @@ code{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Libera
 `;
 
 export const appJs = `
-const $ = (id) => document.getElementById(id);
-const editorEl = $('editor');
-const updatedEl = $('updatedAt');
-const sizeEl = $('size');
-const copyBtn = $('copyBtn');
-const sendBtn = $('sendBtn');
-const clearBtn = $('clearBtn');
-const dotEl = $('dot');
-const statusEl = $('status');
-
-const setStatus = (ok, label) => {
-  statusEl.textContent = label;
-  dotEl.classList.toggle('ok', ok);
-};
-
-const formatBytes = (n) => {
-  if (!Number.isFinite(n)) return '—';
-  if (n < 1024) return n + ' B';
-  const kb = n / 1024;
-  if (kb < 1024) return kb.toFixed(1) + ' KB';
-  const mb = kb / 1024;
-  return mb.toFixed(1) + ' MB';
-};
-
-const computeApiUrl = () => {
+(() => {
   try {
-    const u = new URL(window.location.href);
-    const port = u.port ? parseInt(u.port, 10) : (u.protocol === 'https:' ? 443 : 80);
-    u.port = String(port + 1);
-    u.pathname = '/data';
-    u.search = '';
-    u.hash = '';
-    return u.toString();
-  } catch {
-    return null;
-  }
-};
+    const $ = (id) => document.getElementById(id);
+    const textEl = $('sharedText');
+    const updatedEl = $('updatedAt');
+    const sizeEl = $('size');
+    const copyBtn = $('copyBtn');
+    const dotEl = $('dot');
+    const statusEl = $('status');
 
-const apiUrl = computeApiUrl();
-let lastAppliedUpdatedAt = null;
-let dirty = false;
-let sendTimer = null;
+    const safeStatus = (ok, label) => {
+      if (statusEl) statusEl.textContent = label;
+      if (dotEl && dotEl.classList) dotEl.classList.toggle('ok', !!ok);
+    };
 
-async function tick() {
-  try {
-    if (!apiUrl) throw new Error('No api url');
-    const res = await fetch(apiUrl + '?ts=' + Date.now(), { cache: 'no-store' });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
-    const nextText = typeof data.text === 'string' ? data.text : '';
-    const nextUpdatedAt = typeof data.updatedAt === 'string' ? data.updatedAt : null;
-    const nextSize = typeof data.size === 'number' ? data.size : (nextText || '').length;
-
-    if (!dirty && nextUpdatedAt && nextUpdatedAt !== lastAppliedUpdatedAt) {
-      editorEl.value = nextText || '';
-      lastAppliedUpdatedAt = nextUpdatedAt;
+    if (!textEl || !updatedEl || !sizeEl || !copyBtn) {
+      safeStatus(false, 'UI error');
+      return;
     }
 
-    updatedEl.textContent = nextUpdatedAt ? new Date(nextUpdatedAt).toLocaleString() : '—';
-    sizeEl.textContent = formatBytes(nextSize);
-    setStatus(true, dirty ? 'Editing…' : 'Connected');
-  } catch (e) {
-    setStatus(false, 'Waiting for host…');
-  }
-}
+    const setStatus = (ok, label) => {
+      statusEl.textContent = label;
+      dotEl.classList.toggle('ok', ok);
+    };
 
-async function copyText() {
-  const value = editorEl.value || '';
-  if (!value) return;
+    const formatBytes = (n) => {
+      if (!Number.isFinite(n)) return '—';
+      if (n < 1024) return n + ' B';
+      const kb = n / 1024;
+      if (kb < 1024) return kb.toFixed(1) + ' KB';
+      const mb = kb / 1024;
+      return mb.toFixed(1) + ' MB';
+    };
 
-  try {
-    await navigator.clipboard.writeText(value);
-    copyBtn.textContent = 'Copied';
-    setTimeout(() => (copyBtn.textContent = 'Copy'), 1200);
+    const apiUrl = '/data';
+    const fallbackUrl = '/data.json';
+    let lastAppliedUpdatedAt = null;
+    let mode = 'api'; // 'sse' | 'api' | 'offline'
+    let inFlight = false;
+    let failStreak = 0;
+    let lastGoodAt = 0;
+    let pollBackoffMs = 800;
+    let pollTimer = null;
+    let es = null;
+
+    const setOptimisticStatus = () => {
+      if (mode === 'sse') {
+        setStatus(true, 'Connected');
+        return;
+      }
+      if (mode === 'api') {
+        setStatus(true, 'Connected');
+        return;
+      }
+      if (mode === 'fallback') {
+        setStatus(true, 'Connected');
+        return;
+      }
+      const now = Date.now();
+      if (lastGoodAt && now - lastGoodAt < 15000) {
+        setStatus(false, 'Reconnecting…');
+      } else {
+        setStatus(false, 'Connecting…');
+      }
+    };
+
+    const applySnapshot = (data) => {
+      const nextText = typeof data.text === 'string' ? data.text : '';
+      const nextUpdatedAt = typeof data.updatedAt === 'string' ? data.updatedAt : null;
+      const nextSize = typeof data.size === 'number' ? data.size : (nextText || '').length;
+
+      if (nextUpdatedAt && nextUpdatedAt !== lastAppliedUpdatedAt) {
+        textEl.textContent = nextText || '—';
+        lastAppliedUpdatedAt = nextUpdatedAt;
+      }
+
+      updatedEl.textContent = nextUpdatedAt ? new Date(nextUpdatedAt).toLocaleString() : '—';
+      sizeEl.textContent = formatBytes(nextSize);
+      lastGoodAt = Date.now();
+      failStreak = 0;
+      pollBackoffMs = 800;
+      setOptimisticStatus();
+    };
+
+    async function tick() {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const now = Date.now();
+        const tryApi = async () => {
+          const res = await fetch(apiUrl + '?ts=' + now, { cache: 'no-store' });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.json();
+        };
+
+        const tryFallback = async () => {
+          const res = await fetch(fallbackUrl + '?ts=' + now, { cache: 'no-store' });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.json();
+        };
+
+        let data = null;
+        data = await tryApi();
+        if (mode !== 'sse') mode = 'api';
+        applySnapshot(data);
+      } catch (e) {
+        failStreak += 1;
+        mode = 'offline';
+        setOptimisticStatus();
+      } finally {
+        inFlight = false;
+      }
+    }
+
+    async function copyText() {
+      const value = textEl.textContent === '—' ? '' : (textEl.textContent || '');
+      if (!value) return;
+
+      try {
+        await navigator.clipboard.writeText(value);
+        copyBtn.textContent = 'Copied';
+        setTimeout(() => (copyBtn.textContent = 'Copy'), 1200);
+      } catch {
+        const ta = document.createElement('textarea');
+        ta.value = value;
+        ta.style.position = 'fixed';
+        ta.style.top = '-9999px';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        copyBtn.textContent = 'Copied';
+        setTimeout(() => (copyBtn.textContent = 'Copy'), 1200);
+      }
+    }
+
+    copyBtn.addEventListener('click', copyText);
+
+    const startPolling = () => {
+      if (pollTimer) return;
+      const loop = async () => {
+        pollTimer = setTimeout(loop, pollBackoffMs);
+        if (mode === 'sse' && Date.now() - lastGoodAt < 2500) return;
+        await tick();
+        if (mode === 'offline') pollBackoffMs = Math.min(12000, Math.round(pollBackoffMs * 1.6));
+      };
+      loop();
+    };
+
+    const startSse = () => {
+      if (typeof EventSource !== 'function') return;
+      try {
+        es = new EventSource('/events');
+        mode = 'sse';
+        setOptimisticStatus();
+        es.addEventListener('snapshot', (e) => {
+          try {
+            applySnapshot(JSON.parse(e.data));
+          } catch {
+            // ignore parse errors
+          }
+        });
+        es.onopen = () => {
+          mode = 'sse';
+          setOptimisticStatus();
+        };
+        es.onerror = () => {
+          // EventSource reconnects automatically. Keep it optimistic.
+          if (mode === 'sse') mode = 'api';
+          setOptimisticStatus();
+          startPolling();
+        };
+      } catch {
+        // fall back to polling
+      }
+    };
+
+    startSse();
+    startPolling();
   } catch {
-    const ta = document.createElement('textarea');
-    ta.value = value;
-    ta.style.position = 'fixed';
-    ta.style.top = '-9999px';
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    document.execCommand('copy');
-    document.body.removeChild(ta);
-    copyBtn.textContent = 'Copied';
-    setTimeout(() => (copyBtn.textContent = 'Copy'), 1200);
+    try {
+      const statusEl = document.getElementById('status');
+      if (statusEl) statusEl.textContent = 'Script error';
+    } catch {
+      // ignore
+    }
   }
-}
-
-copyBtn.addEventListener('click', copyText);
-
-async function sendText() {
-  const value = editorEl.value || '';
-  if (!apiUrl) return;
-  try {
-    sendBtn.textContent = 'Sending…';
-    await fetch(apiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: value }),
-    });
-    dirty = false;
-    lastAppliedUpdatedAt = null;
-    sendBtn.textContent = 'Send';
-  } catch {
-    sendBtn.textContent = 'Retry';
-  }
-}
-
-function scheduleSend() {
-  dirty = true;
-  if (sendTimer) clearTimeout(sendTimer);
-  sendTimer = setTimeout(sendText, 300);
-}
-
-editorEl.addEventListener('input', scheduleSend);
-sendBtn.addEventListener('click', sendText);
-clearBtn.addEventListener('click', () => {
-  editorEl.value = '';
-  scheduleSend();
-});
-
-tick();
-setInterval(tick, 700);
+})();
 `;
 
 export const indexHtml = `
@@ -218,8 +269,9 @@ export const indexHtml = `
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <title>EZCP • Live Text</title>
-    <link rel="stylesheet" href="/styles.css" />
-    <script defer src="/app.js"></script>
+    <style>
+      ${stylesCss}
+    </style>
   </head>
   <body>
     <div class="wrap">
@@ -236,15 +288,13 @@ export const indexHtml = `
 
       <div class="card">
         <div class="row">
-          <div class="label">Live Text (Two-way)</div>
+          <div class="label">Live Text</div>
         </div>
 
-        <textarea id="editor" class="editor" placeholder="Paste here to send back to the phone…"></textarea>
+        <div id="sharedText" class="preview">—</div>
 
         <div class="actions actionsBottom">
           <button id="copyBtn" class="primary" type="button">Copy</button>
-          <button id="sendBtn" type="button">Send</button>
-          <button id="clearBtn" type="button">Clear</button>
         </div>
 
         <div class="meta">
@@ -253,11 +303,13 @@ export const indexHtml = `
         </div>
 
         <div class="hint">
-          Changes you type here sync back to the phone automatically. If you want to keep your edits,
-          wait for the status to show <code>Connected</code> (not <code>Editing…</code>).
+          This page updates automatically while the host is sharing. Tap Copy to copy the latest text.
         </div>
       </div>
     </div>
+    <script>
+      ${appJs}
+    </script>
   </body>
 </html>
 `;
