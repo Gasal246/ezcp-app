@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "EZCP",
+    "slug": "ezcp",
+    "version": "0.1.0",
+    "icon": "./asset/png/icon.png",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "EZCP uses your local network to share text with other devices connected to the same Wi‑Fi or hotspot."
+      },
+      "bundleIdentifier": "com.gasal246.ezcp"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./asset/png/adaptive-icon.png",
+        "backgroundColor": "#0F172A"
+      },
+      "package": "com.gasal246.ezcp"
+    }
+  }
+}
